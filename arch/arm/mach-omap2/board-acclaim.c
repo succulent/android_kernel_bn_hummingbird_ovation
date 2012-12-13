@@ -17,14 +17,18 @@
 #include <linux/platform_device.h>
 #include <linux/io.h>
 #include <linux/gpio.h>
+
 #include <linux/moduleparam.h>
 #include <linux/memblock.h>
 #include <linux/usb/otg.h>
+
 #include <linux/spi/spi.h>
 #include <linux/hwspinlock.h>
+
 #include <linux/i2c/twl.h>
 #include <linux/regulator/machine.h>
 #include <linux/regulator/fixed.h>
+
 #include <linux/wl12xx.h>
 #include <linux/skbuff.h>
 #include <linux/ti_wilink_st.h>
@@ -32,6 +36,7 @@
 
 #include <mach/dmm.h>
 #include <mach/hardware.h>
+#include <plat/android-display.h>
 #include <mach/omap4-common.h>
 #include <mach/emif.h>
 #include <mach/lpddr2-elpida.h>
@@ -47,7 +52,6 @@
 #include <plat/usb.h>
 #include <plat/mmc.h>
 #include <plat/omap_apps_brd_id.h>
-#include <plat/omap-serial.h>
 #include <plat/remoteproc.h>
 #include <plat/omap-pm.h>
 #include <linux/wakelock.h>
@@ -62,6 +66,14 @@
 #include "board-acclaim.h"
 #include <mach/omap4_ion.h>
 #include "omap_ram_console.h"
+
+#include <linux/delay.h>
+#include <linux/i2c.h>
+#include <linux/interrupt.h>
+#include <linux/leds-omap4430sdp-display.h>
+#include <linux/omapfb.h>
+#include <plat/vram.h>
+#include <video/omapdss.h>
 
 #ifdef CONFIG_INPUT_KXTF9
 #include <linux/input/kxtf9.h>
@@ -84,6 +96,11 @@
 #define KXTF9_DEVICE_ID                 "kxtf9"
 #define KXTF9_I2C_SLAVE_ADDRESS         0x0F
 #define KXTF9_GPIO_FOR_PWR              34
+
+#define DEFAULT_BACKLIGHT_BRIGHTNESS    105
+#define LCD_BL_PWR_EN_GPIO	38
+#define LCD_CABC0_GPIO		44
+#define LCD_CABC1_GPIO		45
 
 static int kxtf9_gpio_for_irq = 0;
 struct kxtf9_platform_data kxtf9_platform_data_here = {
@@ -721,8 +738,185 @@ static int __init omap4_i2c_init(void)
 }
 
 
+static void acclaim4430_disp_backlight_init(void)
+{
+	int ret;
+
+	ret = gpio_request(LCD_BL_PWR_EN_GPIO, "BL-PWR-EN");
+	if (ret)
+		pr_err("Cannot request backlight power enable gpio");
+	gpio_direction_output(LCD_BL_PWR_EN_GPIO, 0);
+}
+
+static void acclaim4430_disp_backlight_setpower(struct omap_pwm_led_platform_data *pdata, int state)
+{
+        if (state)
+                gpio_direction_output(LCD_BL_PWR_EN_GPIO,  1);
+        else
+                gpio_direction_output(LCD_BL_PWR_EN_GPIO,  0);
+	gpio_direction_output(LCD_CABC0_GPIO, 0);
+	gpio_direction_output(LCD_CABC1_GPIO, 0);
+	printk("[BL set power] %d\n", state);
+}
+
+static struct omap_pwm_led_platform_data acclaim4430_disp_backlight_data = {
+        .name            = "lcd-backlight",
+        .pwm_module_id   = 11,
+        .def_on          = 0,
+        .set_power       = acclaim4430_disp_backlight_setpower,
+        .def_brightness  = DEFAULT_BACKLIGHT_BRIGHTNESS,
+};
+
+static struct platform_device sdp4430_disp_led = {
+        .name   =       "omap_pwm_led",
+        .id     =       -1,
+        .dev    = {
+                .platform_data = &acclaim4430_disp_backlight_data,
+        },
+};
+
+static struct regulator_consumer_supply acclaim_lcd_tp_supply[] = {
+        { .supply = "vtp" },
+        { .supply = "vlcd" },
+};
+
+static struct regulator_init_data acclaim_lcd_tp_vinit = {
+        .constraints = {
+                .min_uV = 3300000,
+                .max_uV = 3300000,
+                .valid_modes_mask = REGULATOR_MODE_NORMAL,
+                .valid_ops_mask = REGULATOR_CHANGE_STATUS,
+        },
+        .num_consumer_supplies = 2,
+        .consumer_supplies = acclaim_lcd_tp_supply,
+};
+
+static struct fixed_voltage_config acclaim_lcd_touch_reg_data = {
+        .supply_name = "vdd_lcdtp",
+        .microvolts = 3300000,
+        .gpio = 36,
+        .enable_high = 1,
+        .enabled_at_boot = 1,
+        .init_data = &acclaim_lcd_tp_vinit,
+};
+
+static struct platform_device acclaim_lcd_touch_regulator_device = {
+        .name   = "reg-fixed-voltage",
+        .id     = -1,
+        .dev    = {
+                .platform_data = &acclaim_lcd_touch_reg_data,
+        },
+};
+
+
 static bool enable_suspend_off = true;
 module_param(enable_suspend_off, bool, S_IRUSR | S_IRGRP | S_IROTH);
+
+static struct platform_device *sdp4430_devices[] __initdata = {
+        &sdp4430_disp_led,
+	&acclaim_lcd_touch_regulator_device,
+};
+
+//
+static struct boxer_panel_data boxer_panel;
+
+//
+static void tablet_lcd_init(void)
+{
+	u32 reg;
+
+	/* Enable 3 lanes in DSI1 module, disable pull down */
+	reg = omap4_ctrl_pad_readl(OMAP4_CTRL_MODULE_PAD_CORE_CONTROL_DSIPHY);
+	reg &= ~OMAP4_DSI1_LANEENABLE_MASK;
+	reg |= 0x1f << OMAP4_DSI1_LANEENABLE_SHIFT;
+	reg &= ~OMAP4_DSI1_PIPD_MASK;
+	reg |= 0x1f << OMAP4_DSI1_PIPD_SHIFT;
+	omap4_ctrl_pad_writel(reg, OMAP4_CTRL_MODULE_PAD_CORE_CONTROL_DSIPHY);
+}
+
+//
+static struct omap_dss_device tablet_lcd_device = {
+        .name                   = "boxerLCD",
+        .driver_name            = "boxer_panel_drv",
+        .type                   = OMAP_DISPLAY_TYPE_DPI,
+        .phy.dpi.data_lines     = 24,
+        .channel                = OMAP_DSS_CHANNEL_LCD2,
+        .data                   = &boxer_panel,
+};
+
+
+//
+static struct omap_dss_device *tablet_dss_devices[] = {
+	&tablet_lcd_device,
+};
+
+//
+static struct omap_dss_board_info tablet_dss_data = {
+	.num_devices	= ARRAY_SIZE(tablet_dss_devices),
+	.devices	= tablet_dss_devices,
+	.default_device	= &tablet_lcd_device,
+};
+
+//
+#define TABLET_FB_RAM_SIZE                SZ_16M /* 1920×1080*4 * 2 */
+static struct omapfb_platform_data tablet_fb_pdata = {
+	.mem_desc = {
+		.region_cnt = 1,
+		.region = {
+			[0] = {
+				.size = TABLET_FB_RAM_SIZE,
+			},
+		},
+	},
+};
+
+
+static void sdp4430_panel_get_resource(void)
+{
+        int ret_val = 0;
+//        ret_val = gpio_request(36, "BOXER LCD PWR EN");
+//        if ( ret_val ){
+//                printk("%s : Could not request lcd pwr enable\n",__FUNCTION__);
+//        }
+
+        ret_val = gpio_request(LCD_CABC0_GPIO, "BOXER CABC0");
+        if ( ret_val ){
+                printk( "%s : could not request CABC0\n",__FUNCTION__);
+        }
+
+        ret_val = gpio_request(LCD_CABC1_GPIO, "BOXER CABC1");
+        if ( ret_val ) {
+                printk("%s: could not request CABC1\n",__FUNCTION__);
+        }
+}
+
+static struct spi_board_info sdp4430_spi_board_info[] __initdata = {
+	{
+		.modalias               = "boxer_disp_spi",
+		.bus_num                = 4,    /* 4: McSPI4 */
+		.chip_select            = 0,
+		.max_speed_hz           = 375000,
+		.platform_data          = &tablet_lcd_device,
+	},
+};
+
+int __init acclaim_panel_init(void)
+{
+	sdp4430_panel_get_resource();
+	acclaim4430_disp_backlight_init();
+	tablet_lcd_init();
+	/* disabling HDMI since Acclaim does not provide such support */
+	omap_vram_set_sdram_vram(TABLET_FB_RAM_SIZE, 0);
+	omapfb_set_platform_data(&tablet_fb_pdata);
+
+	omap_display_init(&tablet_dss_data);
+	omap_mux_init_signal("abe_dmic_din2.dmtimer11_pwm_evt", OMAP_MUX_MODE5);
+	platform_add_devices(sdp4430_devices, ARRAY_SIZE(sdp4430_devices));
+	spi_register_board_info(sdp4430_spi_board_info,
+			ARRAY_SIZE(sdp4430_spi_board_info));
+
+	return 0;
+}
 
 #ifdef CONFIG_OMAP_MUX
 static struct omap_board_mux board_mux[] __initdata = {
@@ -888,7 +1082,7 @@ static void __init omap4_ehci_ohci_init(void)
 static void __init omap4_ehci_ohci_init(void){}
 #endif
 
-static void acclaim_mem_init(void)
+static void __init acclaim_mem_init(void)
 {
 	switch(sdram_vendor()) {
 		case SAMSUNG_SDRAM:
@@ -954,23 +1148,34 @@ static void __init omap_tablet_reserve(void)
 	omap_init_ram_size();
 
 #ifdef CONFIG_ION_OMAP
+	omap_android_display_setup(&tablet_dss_data,
+				   NULL,
+				   NULL,
+				   &tablet_fb_pdata,
+				   get_omap_ion_platform_data());
 	omap_ion_init();
+#else
+	omap_android_display_setup(&tablet_dss_data,
+				   NULL,
+				   NULL,
+				   &tablet_fb_pdata,
+				   NULL);
 #endif
 
 	omap_ram_console_init(OMAP_RAM_CONSOLE_START_DEFAULT,
-			      OMAP_RAM_CONSOLE_SIZE_DEFAULT);
+			OMAP_RAM_CONSOLE_SIZE_DEFAULT);
 
 	/* do the static reservations first */
 	memblock_remove(PHYS_ADDR_SMC_MEM, PHYS_ADDR_SMC_SIZE);
 	memblock_remove(PHYS_ADDR_DUCATI_MEM, PHYS_ADDR_DUCATI_SIZE);
-
 	/* ipu needs to recognize secure input buffer area as well */
-	omap_ipu_set_static_mempool(PHYS_ADDR_DUCATI_MEM, PHYS_ADDR_DUCATI_SIZE +
-					OMAP4_ION_HEAP_SECURE_INPUT_SIZE);
+	omap_ipu_set_static_mempool(PHYS_ADDR_DUCATI_MEM,
+					PHYS_ADDR_DUCATI_SIZE +
+					OMAP4_ION_HEAP_SECURE_INPUT_SIZE +
+					OMAP4_ION_HEAP_SECURE_OUTPUT_WFDHDCP_SIZE);
 
 	omap_reserve();
 }
-
 
 MACHINE_START(OMAP_ACCLAIM, "OMAP4 acclaim board")
 	/* Maintainer: Dan Murphy - Texas Instruments Inc */
