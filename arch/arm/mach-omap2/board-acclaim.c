@@ -836,7 +836,7 @@ static void tablet_lcd_init(void)
 
 //
 static struct omap_dss_device tablet_lcd_device = {
-        .name                   = "boxerLCD",
+        .name                   = "lcd2",
         .driver_name            = "boxer_panel_drv",
         .type                   = OMAP_DISPLAY_TYPE_DPI,
         .phy.dpi.data_lines     = 24,
