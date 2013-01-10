@@ -705,4 +705,3 @@ module_exit(lp855x_exit);
 MODULE_DESCRIPTION("Texas Instruments LP855x Backlight driver");
 MODULE_AUTHOR("Milo Kim <milo.kim@ti.com>, Dainel Jeong <daniel.jeong@ti.com>");
 MODULE_LICENSE("GPL");
-

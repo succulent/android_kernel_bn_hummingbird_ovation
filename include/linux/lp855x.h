@@ -179,4 +179,3 @@ struct lp855x_platform_data {
 };
 
 #endif
-
