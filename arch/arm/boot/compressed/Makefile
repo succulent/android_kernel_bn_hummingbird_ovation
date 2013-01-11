@@ -16,7 +16,7 @@ OBJS		+= mmcif-sh7372.o
 endif
 endif
 
-AFLAGS_head.o := -DTEXT_OFFSET=$(TEXT_OFFSET)
+AFLAGS_head.o += -DTEXT_OFFSET=$(TEXT_OFFSET)
 AFLAGS_head.o += -Wa,-march=armv7-a$(plus_sec)
 HEAD = head.o
 
